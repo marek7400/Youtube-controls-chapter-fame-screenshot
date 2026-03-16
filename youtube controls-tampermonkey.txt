@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         YouTube Custom Controls (Tylko przewijanie, Auto-Ukrywanie)
+// @name         YouTube Custom Controls (Przewijanie, Ukrywanie, Zrzut ekranu + Miniaturki)
 // @namespace    http://tampermonkey.net/
-// @version      4.0
-// @description  Wymusza renderowanie ikon, pokazuje się tylko po najechaniu myszką
+// @version      4.4
+// @description  Zrzut klatki wideo. Gdy czas wynosi 0:00, pobiera oryginalną miniaturkę z YouTube.
 // @author       Twój Nick
 // @match        *://*.youtube.com/*
 // @grant        none
@@ -11,24 +11,31 @@
 (function() {
     'use strict';
 
-    // Wstrzykujemy style CSS do strony, aby panel płynnie się pojawiał i znikał
+    // Wstrzykujemy style CSS do strony
     function addHoverStyles() {
         if (document.getElementById('custom-yt-controls-style')) return;
-        
+
         const style = document.createElement('style');
         style.id = 'custom-yt-controls-style';
-        
-        // Wykorzystujemy klasę .ytp-autohide z odtwarzacza YouTube.
-        // YouTube dodaje ją, gdy ukrywa swój pasek, i usuwa po ruszeniu/najechaniu myszką.
+
         style.textContent = `
             #custom-yt-controls {
                 opacity: 0;
                 visibility: hidden;
+                pointer-events: none;
                 transition: opacity 0.25s cubic-bezier(0.0,0.0,0.2,1), visibility 0.25s;
             }
-            .html5-video-player:not(.ytp-autohide) #custom-yt-controls {
-                opacity: 1;
-                visibility: visible;
+            .html5-video-player:not(.ytp-autohide) #custom-yt-controls,
+            #custom-yt-controls:hover {
+                opacity: 1 !important;
+                visibility: visible !important;
+                pointer-events: auto;
+            }
+            /* Ukrywanie naszego paska, gdy menu ustawień YT jest otwarte */
+            .html5-video-player:has(.ytp-settings-button[aria-expanded="true"]) #custom-yt-controls {
+                opacity: 0 !important;
+                visibility: hidden !important;
+                pointer-events: none !important;
             }
         `;
         document.head.appendChild(style);
@@ -37,7 +44,7 @@
     // Symulacja wciśnięcia klawiszy
     function simulateKey(key, keyCode, ctrlKey = false) {
         const target = document.querySelector('.html5-video-player') || document.body;
-        
+
         const eventObj = {
             key: key,
             code: key === ',' ? 'Comma' : (key === '.' ? 'Period' : key),
@@ -48,7 +55,7 @@
             cancelable: true,
             composed: true
         };
-        
+
         target.dispatchEvent(new KeyboardEvent('keydown', eventObj));
         target.dispatchEvent(new KeyboardEvent('keyup', eventObj));
     }
@@ -59,7 +66,7 @@
         svg.setAttribute('viewBox', '0 0 24 24');
         svg.style.width = '24px';
         svg.style.height = '24px';
-        svg.style.fill = '#ffffff'; 
+        svg.style.fill = '#ffffff';
         svg.style.display = 'block';
 
         const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
@@ -69,18 +76,104 @@
         return svg;
     }
 
-    // Konfiguracja przycisków (usunięto + i -)
+    // Konfiguracja przycisków
     const buttonsConfig =[
+        {
+            id: 'btn-screenshot',
+            title: 'Zrób zrzut ekranu (lub pobierz miniaturkę na starcie)',
+            path: 'M4 4h3l2-2h6l2 2h3c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zm8 3c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0 8c-1.65 0-3-1.35-3-3s1.35-3 3-3 3 1.35 3 3-1.35 3-3 3z',
+            action: async () => {
+                const video = document.querySelector('video');
+                if (!video) return;
+
+                try {
+                    // LOGIKA 1: Jeśli wideo jest na samym początku (czas 0:00), spróbuj pobrać miniaturkę.
+                    if (video.currentTime === 0) {
+                        const urlParams = new URLSearchParams(window.location.search);
+                        const videoId = urlParams.get('v');
+
+                        if (videoId) {
+                            // YT przetrzymuje miniaturki w różnych jakościach. Zaczynamy od najwyższej (maxresdefault).
+                            const thumbUrls =[
+                                `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+                                `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
+                            ];
+
+                            let thumbDownloaded = false;
+
+                            for (const url of thumbUrls) {
+                                try {
+                                    const response = await fetch(url);
+                                    if (response.ok) {
+                                        const blob = await response.blob();
+                                        const blobUrl = URL.createObjectURL(blob);
+
+                                        // Wymuszenie pobierania miniaturki
+                                        const a = document.createElement('a');
+                                        a.href = blobUrl;
+                                        a.download = `YouTube_Miniaturka_${videoId}.jpg`;
+                                        document.body.appendChild(a);
+                                        a.click();
+                                        document.body.removeChild(a);
+
+                                        URL.revokeObjectURL(blobUrl);
+                                        thumbDownloaded = true;
+                                        break; // Przerywamy pętlę, bo sukces
+                                    }
+                                } catch (e) {
+                                    console.warn('Nie udało się pobrać miniaturki przez fetch, sprawdzam niższe jakości...', e);
+                                }
+                            }
+
+                            // Jeśli udało się zapisać oryginalną miniaturkę, przerywamy funkcję - cel osiągnięty!
+                            if (thumbDownloaded) return;
+                        }
+                    }
+
+                    // LOGIKA 2: Standardowy zrzut wideo z playera (zabezpieczenie jeśli wideo jeszcze nie ma wymiarów)
+                    if (video.videoWidth === 0 || video.videoHeight === 0) {
+                        alert('Zbyt wcześnie na zrzut ekranu – obraz nie został załadowany. Odtwórz film na sekundę.');
+                        return;
+                    }
+
+                    const canvas = document.createElement('canvas');
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                    const dataUrl = canvas.toDataURL('image/png');
+
+                    const time = video.currentTime;
+                    const hours = Math.floor(time / 3600);
+                    const minutes = Math.floor((time % 3600) / 60);
+                    const seconds = Math.floor(time % 60);
+                    const timeString = `${hours > 0 ? hours + 'h' : ''}${minutes}m${seconds}s`;
+
+                    const a = document.createElement('a');
+                    a.href = dataUrl;
+                    a.download = `YouTube_Zrzut_${timeString}.png`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+
+                } catch (err) {
+                    console.error('Błąd zrzutu ekranu:', err);
+                    alert('Nie udało się wykonać akcji. Wideo może być chronione DRM.');
+                }
+            }
+        },
         {
             id: 'btn-ctrl-left',
             title: 'Ctrl + Strzałka w lewo',
-            path: 'M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z', 
+            path: 'M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z',
             action: () => { simulateKey('ArrowLeft', 37, true); }
         },
         {
             id: 'btn-comma',
             title: 'Klatka w tył (,)',
-            path: 'M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6 1.41-1.41z', 
+            path: 'M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6 1.41-1.41z',
             action: () => {
                 simulateKey(',', 188);
                 const vid = document.querySelector('video');
@@ -90,7 +183,7 @@
         {
             id: 'btn-dot',
             title: 'Klatka w przód (.)',
-            path: 'M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z', 
+            path: 'M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z',
             action: () => {
                 simulateKey('.', 190);
                 const vid = document.querySelector('video');
@@ -100,37 +193,36 @@
         {
             id: 'btn-ctrl-right',
             title: 'Ctrl + Strzałka w prawo',
-            path: 'M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z', 
+            path: 'M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z',
             action: () => { simulateKey('ArrowRight', 39, true); }
         }
     ];
 
     function checkAndCreateUI() {
         if (!window.location.pathname.startsWith('/watch')) return;
-        
-        // Dodajemy style do ukrywania/pokazywania
+
         addHoverStyles();
 
         if (document.getElementById('custom-yt-controls')) return;
 
         const player = document.querySelector('.html5-video-player');
-        if (!player) return; 
+        if (!player) return;
 
         const container = document.createElement('div');
         container.id = 'custom-yt-controls';
 
-        // Wygląd i pozycja (bazowe)
+        // Wygląd i pozycja (z-index 50 aby chowało się pod menu)
         Object.assign(container.style, {
-            position: 'absolute', 
-            bottom: '70px',       
-            right: '25px',        
-            backgroundColor: 'rgba(0, 0, 0, 0.7)', 
+            position: 'absolute',
+            bottom: '70px',
+            right: '25px',
+            backgroundColor: 'rgba(0, 0, 0, 0.7)',
             backdropFilter: 'blur(4px)',
             borderRadius: '10px',
             padding: '6px',
             display: 'flex',
             gap: '8px',
-            zIndex: '999999',     
+            zIndex: '50',
             boxShadow: '0 2px 10px rgba(0,0,0,0.5)',
             alignItems: 'center'
         });
@@ -160,11 +252,11 @@
                 outline: 'none'
             });
 
-            btn.addEventListener('mouseenter', () => { 
-                btn.style.backgroundColor = 'rgba(255, 255, 255, 0.25)'; 
+            btn.addEventListener('mouseenter', () => {
+                btn.style.backgroundColor = 'rgba(255, 255, 255, 0.25)';
             });
-            btn.addEventListener('mouseleave', () => { 
-                btn.style.backgroundColor = 'transparent'; 
+            btn.addEventListener('mouseleave', () => {
+                btn.style.backgroundColor = 'transparent';
             });
 
             btn.addEventListener('click', (e) => {
